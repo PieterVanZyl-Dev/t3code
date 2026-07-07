@@ -677,6 +677,33 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest()))(
         ),
       );
 
+      it.effect(
+        "treats a non-first-party API backend (Bedrock) as authenticated even when auth status is not logged in",
+        () =>
+          Effect.gen(function* () {
+            const status = yield* checkClaudeProviderStatus(
+              () => Effect.succeed(undefined),
+              () => Effect.succeed(undefined),
+              () => Effect.succeed("bedrock"),
+            );
+            assert.strictEqual(status.provider, "claudeAgent");
+            assert.strictEqual(status.status, "ready");
+            assert.strictEqual(status.auth.status, "authenticated");
+            assert.strictEqual(status.auth.type, "bedrock");
+            assert.strictEqual(status.auth.label, "Amazon Bedrock");
+          }).pipe(
+            Effect.provide(
+              mockSpawnerLayer((args) => {
+                const joined = args.join(" ");
+                if (joined === "--version") return { stdout: "1.0.0\n", stderr: "", code: 0 };
+                if (joined === "auth status")
+                  return { stdout: '{"loggedIn":false}\n', stderr: "", code: 0 };
+                throw new Error(`Unexpected args: ${joined}`);
+              }),
+            ),
+          ),
+      );
+
       it.effect("includes probed claude slash commands in the provider snapshot", () =>
         Effect.gen(function* () {
           const status = yield* checkClaudeProviderStatus(

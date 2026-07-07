@@ -409,6 +409,12 @@ function claudeAuthMetadata(input: {
   return undefined;
 }
 
+function bedrockApiProviderAuth(
+  apiProvider: string | undefined,
+): { readonly type: string; readonly label: string } | undefined {
+  return apiProvider === "bedrock" ? { type: "bedrock", label: "Amazon Bedrock" } : undefined;
+}
+
 // ── SDK capability probe ────────────────────────────────────────────
 
 const CAPABILITIES_PROBE_TIMEOUT_MS = 8_000;
@@ -525,6 +531,7 @@ const probeClaudeCapabilities = (binaryPath: string) => {
     const init = await q.initializationResult();
     return {
       subscriptionType: init.account?.subscriptionType,
+      apiProvider: init.account?.apiProvider,
       slashCommands: parseClaudeInitializationCommands(init.commands),
     };
   }).pipe(
@@ -558,6 +565,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   resolveSlashCommands?: (
     binaryPath: string,
   ) => Effect.Effect<ReadonlyArray<ServerProviderSlashCommand> | undefined>,
+  resolveApiProvider?: (binaryPath: string) => Effect.Effect<string | undefined>,
 ): Effect.fn.Return<
   ServerProvider,
   ServerSettingsError,
@@ -737,6 +745,31 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   }
 
   const parsed = parseClaudeAuthStatusFromOutput(authProbe.success.value);
+
+  // In Bedrock mode auth is external (AWS credentials), so `claude auth status`
+  // reports no Anthropic login; fall back to the SDK's apiProvider.
+  if (parsed.status !== "ready" && resolveApiProvider) {
+    const bedrockAuth = bedrockApiProviderAuth(
+      yield* resolveApiProvider(claudeSettings.binaryPath),
+    );
+    if (bedrockAuth) {
+      return buildServerProvider({
+        provider: PROVIDER,
+        enabled: claudeSettings.enabled,
+        checkedAt,
+        models,
+        slashCommands: dedupedSlashCommands,
+        probe: {
+          installed: true,
+          version: parsedVersion,
+          status: "ready",
+          auth: { status: "authenticated", ...bedrockAuth },
+          ...(opus47UpgradeMessage ? { message: opus47UpgradeMessage } : {}),
+        },
+      });
+    }
+  }
+
   const authMetadata = claudeAuthMetadata({ subscriptionType, authMethod });
   return buildServerProvider({
     provider: PROVIDER,
@@ -821,6 +854,10 @@ export const ClaudeProviderLive = Layer.effect(
       (binaryPath) =>
         Cache.get(subscriptionProbeCache, binaryPath).pipe(
           Effect.map((probe) => probe?.slashCommands),
+        ),
+      (binaryPath) =>
+        Cache.get(subscriptionProbeCache, binaryPath).pipe(
+          Effect.map((probe) => probe?.apiProvider),
         ),
     ).pipe(
       Effect.provideService(ServerSettingsService, serverSettings),
