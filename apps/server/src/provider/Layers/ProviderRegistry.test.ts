@@ -1554,6 +1554,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
                   claudeAgent: { enabled: false },
                   cursor: { enabled: false },
                   grok: { enabled: false },
+                  kiro: { enabled: false },
                   opencode: { enabled: false },
                 },
               }),
@@ -1738,6 +1739,9 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
                     grok: {
                       enabled: false,
                     },
+                    kiro: {
+                      enabled: false,
+                    },
                   },
                 }),
               ),
@@ -1807,6 +1811,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
                 "codex",
                 "cursor",
                 "grok",
+                "kiro",
                 "opencode",
               ]);
               assert.strictEqual(cursorProvider?.enabled, false);

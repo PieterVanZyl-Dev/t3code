@@ -31,11 +31,13 @@ interface KiroAcpRuntimeInput extends Omit<
 > {
   readonly childProcessSpawner: ChildProcessSpawner.ChildProcessSpawner["Service"];
   readonly kiroSettings: KiroAcpRuntimeKiroSettings | null | undefined;
+  readonly environment?: NodeJS.ProcessEnv;
 }
 
 export function buildKiroAcpSpawnInput(
   kiroSettings: KiroAcpRuntimeKiroSettings | null | undefined,
   cwd: string,
+  environment?: NodeJS.ProcessEnv,
 ): AcpSessionRuntime.AcpSpawnInput {
   return {
     command: kiroSettings?.binaryPath || "kiro-cli",
@@ -44,6 +46,9 @@ export function buildKiroAcpSpawnInput(
       "acp",
     ],
     cwd,
+    // Kiro authenticates out-of-band via AWS IAM Identity Center, so per-instance
+    // environment overrides (PATH, AWS profile/SSO) must reach the child process.
+    ...(environment ? { env: environment } : {}),
   };
 }
 
@@ -61,7 +66,7 @@ export const makeKiroAcpRuntime = (
       // `authenticate` request is skipped entirely.
       AcpSessionRuntime.layer({
         ...input,
-        spawn: buildKiroAcpSpawnInput(input.kiroSettings, input.cwd),
+        spawn: buildKiroAcpSpawnInput(input.kiroSettings, input.cwd, input.environment),
         clientCapabilities: KIRO_PARAMETERIZED_MODEL_PICKER_CAPABILITIES,
       }).pipe(
         Layer.provide(
