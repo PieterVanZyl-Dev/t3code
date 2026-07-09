@@ -4,7 +4,10 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   makeAcpAssistantItemEvent,
   makeAcpContentDeltaEvent,
+  makeAcpDiffUpdatedEvent,
   makeAcpPlanUpdatedEvent,
+  makeAcpProposedCompletedEvent,
+  makeAcpProposedDeltaEvent,
   makeAcpRequestOpenedEvent,
   makeAcpRequestResolvedEvent,
   makeAcpToolCallEvent,
@@ -150,6 +153,57 @@ describe("AcpCoreRuntimeEvents", () => {
         itemType: "assistant_message",
         status: "inProgress",
       },
+    });
+  });
+
+  it("maps ACP thought-chunk and diff updates to canonical proposed/diff events", () => {
+    const stamp = { eventId: "event-1" as never, createdAt: "2026-03-27T00:00:00.000Z" };
+    const turnId = TurnId.make("turn-1");
+
+    expect(
+      makeAcpProposedDeltaEvent({
+        stamp,
+        provider: ProviderDriverKind.make("kiro"),
+        threadId: "thread-1" as never,
+        turnId,
+        delta: "thinking",
+        rawPayload: { sessionId: "session-1" },
+      }),
+    ).toMatchObject({
+      type: "turn.proposed.delta",
+      turnId,
+      payload: { delta: "thinking" },
+      raw: { source: "acp.jsonrpc", method: "session/update" },
+    });
+
+    expect(
+      makeAcpProposedCompletedEvent({
+        stamp,
+        provider: ProviderDriverKind.make("kiro"),
+        threadId: "thread-1" as never,
+        turnId,
+        planMarkdown: "final reasoning",
+      }),
+    ).toMatchObject({
+      type: "turn.proposed.completed",
+      turnId,
+      payload: { planMarkdown: "final reasoning" },
+    });
+
+    expect(
+      makeAcpDiffUpdatedEvent({
+        stamp,
+        provider: ProviderDriverKind.make("kiro"),
+        threadId: "thread-1" as never,
+        turnId,
+        unifiedDiff: "diff --git a/a.txt b/a.txt",
+        rawPayload: { sessionId: "session-1" },
+      }),
+    ).toMatchObject({
+      type: "turn.diff.updated",
+      turnId,
+      payload: { unifiedDiff: "diff --git a/a.txt b/a.txt" },
+      raw: { source: "acp.jsonrpc", method: "session/update" },
     });
   });
 });

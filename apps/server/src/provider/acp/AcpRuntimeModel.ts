@@ -108,6 +108,17 @@ export type AcpParsedSessionEvent =
       readonly itemId?: string;
       readonly text: string;
       readonly rawPayload: unknown;
+    }
+  | {
+      readonly _tag: "ThoughtDelta";
+      readonly text: string;
+      readonly rawPayload: unknown;
+    }
+  | {
+      readonly _tag: "DiffUpdated";
+      readonly toolCallId: string;
+      readonly unifiedDiff: string;
+      readonly rawPayload: unknown;
     };
 
 type AcpSessionSetupResponse =
@@ -283,6 +294,60 @@ function extractTextContentFromToolCallContent(
     }
   }
   return chunks.length > 0 ? chunks.join("\n") : undefined;
+}
+
+function splitAcpDiffLines(text: string): ReadonlyArray<string> {
+  if (text.length === 0) {
+    return [];
+  }
+  const lines = text.split("\n");
+  if (lines.length > 0 && lines[lines.length - 1] === "") {
+    lines.pop();
+  }
+  return lines;
+}
+
+/**
+ * Render an ACP `diff` tool-call content block as a git-style unified diff so
+ * the whole-file replacement it carries (`path`/`oldText`/`newText`) can be
+ * parsed downstream by the same `parseTurnDiffFilesFromUnifiedDiff` helper that
+ * handles Codex `turn.diff.updated` payloads.
+ */
+function makeAcpUnifiedDiff(
+  path: string,
+  oldText: string | null | undefined,
+  newText: string,
+): string {
+  const oldLines = splitAcpDiffLines(oldText ?? "");
+  const newLines = splitAcpDiffLines(newText);
+  const oldStart = oldLines.length === 0 ? 0 : 1;
+  const newStart = newLines.length === 0 ? 0 : 1;
+  return [
+    `diff --git a/${path} b/${path}`,
+    `--- a/${path}`,
+    `+++ b/${path}`,
+    `@@ -${oldStart},${oldLines.length} +${newStart},${newLines.length} @@`,
+    ...oldLines.map((line) => `-${line}`),
+    ...newLines.map((line) => `+${line}`),
+  ].join("\n");
+}
+
+function extractUnifiedDiffFromToolCallContent(
+  content: ReadonlyArray<EffectAcpSchema.ToolCallContent> | null | undefined,
+): string | undefined {
+  if (!content) return undefined;
+  const diffs: Array<string> = [];
+  for (const entry of content) {
+    if (entry.type !== "diff") {
+      continue;
+    }
+    const path = entry.path.trim();
+    if (path.length === 0) {
+      continue;
+    }
+    diffs.push(makeAcpUnifiedDiff(path, entry.oldText, entry.newText));
+  }
+  return diffs.length > 0 ? diffs.join("\n") : undefined;
 }
 
 function normalizeToolKind(kind: unknown): string | undefined {
@@ -551,6 +616,15 @@ export function parseSessionUpdateEvent(params: EffectAcpSchema.SessionNotificat
           rawPayload: params,
         });
       }
+      const unifiedDiff = extractUnifiedDiffFromToolCallContent(upd.content);
+      if (unifiedDiff) {
+        events.push({
+          _tag: "DiffUpdated",
+          toolCallId: upd.toolCallId,
+          unifiedDiff,
+          rawPayload: params,
+        });
+      }
       break;
     }
     case "tool_call_update": {
@@ -562,12 +636,31 @@ export function parseSessionUpdateEvent(params: EffectAcpSchema.SessionNotificat
           rawPayload: params,
         });
       }
+      const unifiedDiff = extractUnifiedDiffFromToolCallContent(upd.content);
+      if (unifiedDiff) {
+        events.push({
+          _tag: "DiffUpdated",
+          toolCallId: upd.toolCallId,
+          unifiedDiff,
+          rawPayload: params,
+        });
+      }
       break;
     }
     case "agent_message_chunk": {
       if (upd.content.type === "text" && upd.content.text.length > 0) {
         events.push({
           _tag: "ContentDelta",
+          text: upd.content.text,
+          rawPayload: params,
+        });
+      }
+      break;
+    }
+    case "agent_thought_chunk": {
+      if (upd.content.type === "text" && upd.content.text.length > 0) {
+        events.push({
+          _tag: "ThoughtDelta",
           text: upd.content.text,
           rawPayload: params,
         });

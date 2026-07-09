@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import type * as EffectAcpSchema from "effect-acp/schema";
 
+import { parseTurnDiffFilesFromUnifiedDiff } from "../../checkpointing/Diffs.ts";
 import {
   extractModelConfigId,
   mergeToolCallState,
@@ -334,6 +335,103 @@ describe("AcpRuntimeModel", () => {
         },
       },
     ]);
+  });
+
+  it("projects agent thought chunks into proposed-content deltas", () => {
+    const result = parseSessionUpdateEvent({
+      sessionId: "session-1",
+      update: {
+        sessionUpdate: "agent_thought_chunk",
+        content: {
+          type: "text",
+          text: "Considering the change",
+        },
+      },
+    } satisfies EffectAcpSchema.SessionNotification);
+
+    expect(result.events).toEqual([
+      {
+        _tag: "ThoughtDelta",
+        text: "Considering the change",
+        rawPayload: {
+          sessionId: "session-1",
+          update: {
+            sessionUpdate: "agent_thought_chunk",
+            content: {
+              type: "text",
+              text: "Considering the change",
+            },
+          },
+        },
+      },
+    ]);
+
+    const emptyResult = parseSessionUpdateEvent({
+      sessionId: "session-1",
+      update: {
+        sessionUpdate: "agent_thought_chunk",
+        content: { type: "text", text: "" },
+      },
+    } satisfies EffectAcpSchema.SessionNotification);
+    expect(emptyResult.events).toEqual([]);
+  });
+
+  it("surfaces tool-call diff content as an additive unified-diff event", () => {
+    const created = parseSessionUpdateEvent({
+      sessionId: "session-1",
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: "tool-1",
+        title: "Edit greeting.txt",
+        kind: "edit",
+        status: "pending",
+        content: [
+          {
+            type: "diff",
+            path: "greeting.txt",
+            oldText: "hello\n",
+            newText: "hello world\n",
+          },
+        ],
+      },
+    } satisfies EffectAcpSchema.SessionNotification);
+
+    // The tool-call lifecycle event is still emitted; the diff event is additive.
+    expect(created.events.map((event) => event._tag)).toEqual(["ToolCallUpdated", "DiffUpdated"]);
+    const createdDiff = created.events.find((event) => event._tag === "DiffUpdated");
+    expect(createdDiff).toBeDefined();
+    if (createdDiff?._tag === "DiffUpdated") {
+      expect(createdDiff.toolCallId).toBe("tool-1");
+      // A git-style unified diff parseable by parseTurnDiffFilesFromUnifiedDiff.
+      expect(parseTurnDiffFilesFromUnifiedDiff(createdDiff.unifiedDiff)).toEqual([
+        { path: "greeting.txt", additions: 1, deletions: 1 },
+      ]);
+    }
+
+    const updated = parseSessionUpdateEvent({
+      sessionId: "session-1",
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tool-1",
+        status: "completed",
+        content: [
+          {
+            type: "diff",
+            path: "greeting.txt",
+            oldText: "hello\n",
+            newText: "hello world\nbye\n",
+          },
+        ],
+      },
+    } satisfies EffectAcpSchema.SessionNotification);
+
+    expect(updated.events.map((event) => event._tag)).toEqual(["ToolCallUpdated", "DiffUpdated"]);
+    const updatedDiff = updated.events.find((event) => event._tag === "DiffUpdated");
+    if (updatedDiff?._tag === "DiffUpdated") {
+      expect(parseTurnDiffFilesFromUnifiedDiff(updatedDiff.unifiedDiff)).toEqual([
+        { path: "greeting.txt", additions: 2, deletions: 1 },
+      ]);
+    }
   });
 
   it("keeps permission request parsing compatible with loose extension payloads", () => {

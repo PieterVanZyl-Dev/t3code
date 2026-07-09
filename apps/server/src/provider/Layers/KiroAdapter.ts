@@ -59,7 +59,10 @@ import type * as AcpSessionRuntime from "../acp/AcpSessionRuntime.ts";
 import {
   makeAcpAssistantItemEvent,
   makeAcpContentDeltaEvent,
+  makeAcpDiffUpdatedEvent,
   makeAcpPlanUpdatedEvent,
+  makeAcpProposedCompletedEvent,
+  makeAcpProposedDeltaEvent,
   makeAcpRequestOpenedEvent,
   makeAcpRequestResolvedEvent,
   makeAcpToolCallEvent,
@@ -106,6 +109,9 @@ interface KiroSessionContext {
   readonly pendingApprovals: Map<ApprovalRequestId, PendingApproval>;
   turns: Array<{ id: TurnId; items: Array<unknown> }>;
   lastPlanFingerprint: string | undefined;
+  /** Streaming agent-thought text accumulated per turn, flushed as a
+   * `turn.proposed.completed` summary when the turn settles. */
+  readonly proposedThoughtByTurn: Map<TurnId, string>;
   activeTurnId: TurnId | undefined;
   /** Turns already interrupted; late prompt RPCs must not resurrect them. */
   interruptedTurnIds: Set<TurnId>;
@@ -285,6 +291,36 @@ export function makeKiroAdapter(kiroSettings: KiroSettings, options?: KiroAdapte
     const withThreadLock = <A, E, R>(threadId: string, effect: Effect.Effect<A, E, R>) =>
       Effect.flatMap(getThreadSemaphore(threadId), (semaphore) => semaphore.withPermit(effect));
 
+    // Emit the accumulated agent-thought stream for a settling turn as a single
+    // `turn.proposed.completed` summary, then clear the buffer. A turn that
+    // streamed no thoughts produces no proposed events (mirrors Codex, which
+    // only finalizes proposed content when a plan item actually completed).
+    const flushProposedThought = (threadId: ThreadId, turnId: TurnId) =>
+      Effect.gen(function* () {
+        const ctx = sessions.get(threadId);
+        if (!ctx) {
+          return;
+        }
+        const buffered = ctx.proposedThoughtByTurn.get(turnId);
+        if (buffered === undefined) {
+          return;
+        }
+        ctx.proposedThoughtByTurn.delete(turnId);
+        const planMarkdown = buffered.trim();
+        if (planMarkdown.length === 0) {
+          return;
+        }
+        yield* offerRuntimeEvent(
+          makeAcpProposedCompletedEvent({
+            stamp: yield* makeEventStamp(),
+            provider: PROVIDER,
+            threadId,
+            turnId,
+            planMarkdown,
+          }),
+        );
+      });
+
     const settlePromptInFlight = (
       threadId: ThreadId,
       turnId: TurnId,
@@ -321,6 +357,7 @@ export function makeKiroAdapter(kiroSettings: KiroSettings, options?: KiroAdapte
           }
           if (options?.emitTurnCompletion !== false) {
             if (options?.errorMessage !== undefined) {
+              yield* flushProposedThought(threadId, turnId);
               yield* offerRuntimeEvent({
                 type: "turn.completed",
                 ...(yield* makeEventStamp()),
@@ -333,6 +370,7 @@ export function makeKiroAdapter(kiroSettings: KiroSettings, options?: KiroAdapte
                 },
               });
             } else if (options?.completedStopReason !== undefined) {
+              yield* flushProposedThought(threadId, turnId);
               yield* offerRuntimeEvent({
                 type: "turn.completed",
                 ...(yield* makeEventStamp()),
@@ -395,6 +433,9 @@ export function makeKiroAdapter(kiroSettings: KiroSettings, options?: KiroAdapte
         };
         if (options?.emitTurnCompletion === false) {
           return;
+        }
+        if (shouldEmitFailedTurn || shouldEmitCompletedTurn) {
+          yield* flushProposedThought(threadId, settleTurnId);
         }
         if (shouldEmitFailedTurn) {
           yield* offerRuntimeEvent({
@@ -707,6 +748,7 @@ export function makeKiroAdapter(kiroSettings: KiroSettings, options?: KiroAdapte
             pendingApprovals,
             turns: [],
             lastPlanFingerprint: undefined,
+            proposedThoughtByTurn: new Map(),
             activeTurnId: undefined,
             interruptedTurnIds: new Set(),
             promptsInFlight: 0,
@@ -724,7 +766,9 @@ export function makeKiroAdapter(kiroSettings: KiroSettings, options?: KiroAdapte
                 if (
                   event._tag === "PlanUpdated" ||
                   event._tag === "ToolCallUpdated" ||
-                  event._tag === "ContentDelta"
+                  event._tag === "ContentDelta" ||
+                  event._tag === "ThoughtDelta" ||
+                  event._tag === "DiffUpdated"
                 ) {
                   yield* logNative(ctx.threadId, "session/update", event.rawPayload);
                 }
@@ -798,6 +842,34 @@ export function makeKiroAdapter(kiroSettings: KiroSettings, options?: KiroAdapte
                         turnId: notificationTurnId,
                         ...(event.itemId ? { itemId: event.itemId } : {}),
                         text: event.text,
+                        rawPayload: event.rawPayload,
+                      }),
+                    );
+                    return;
+                  case "ThoughtDelta":
+                    ctx.proposedThoughtByTurn.set(
+                      notificationTurnId,
+                      (ctx.proposedThoughtByTurn.get(notificationTurnId) ?? "") + event.text,
+                    );
+                    yield* offerRuntimeEvent(
+                      makeAcpProposedDeltaEvent({
+                        stamp,
+                        provider: PROVIDER,
+                        threadId: ctx.threadId,
+                        turnId: notificationTurnId,
+                        delta: event.text,
+                        rawPayload: event.rawPayload,
+                      }),
+                    );
+                    return;
+                  case "DiffUpdated":
+                    yield* offerRuntimeEvent(
+                      makeAcpDiffUpdatedEvent({
+                        stamp,
+                        provider: PROVIDER,
+                        threadId: ctx.threadId,
+                        turnId: notificationTurnId,
+                        unifiedDiff: event.unifiedDiff,
                         rawPayload: event.rawPayload,
                       }),
                     );
@@ -1112,6 +1184,7 @@ export function makeKiroAdapter(kiroSettings: KiroSettings, options?: KiroAdapte
                   ...(prepared.displayModel ? { model: prepared.displayModel } : {}),
                 };
                 const completedStopReason = completedStopReasonFromPromptResponse(result);
+                yield* flushProposedThought(input.threadId, prepared.turnId);
                 yield* offerRuntimeEvent({
                   type: "turn.completed",
                   ...(yield* makeEventStamp()),

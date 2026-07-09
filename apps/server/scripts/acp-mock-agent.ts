@@ -17,6 +17,7 @@ const emitToolCalls = process.env.T3_ACP_EMIT_TOOL_CALLS === "1";
 const emitInterleavedAssistantToolCalls =
   process.env.T3_ACP_EMIT_INTERLEAVED_ASSISTANT_TOOL_CALLS === "1";
 const emitGenericToolPlaceholders = process.env.T3_ACP_EMIT_GENERIC_TOOL_PLACEHOLDERS === "1";
+const emitThoughtsAndDiff = process.env.T3_ACP_EMIT_THOUGHTS_AND_DIFF === "1";
 const emitAskQuestion = process.env.T3_ACP_EMIT_ASK_QUESTION === "1";
 const emitXAiAskUserQuestion = process.env.T3_ACP_EMIT_XAI_ASK_USER_QUESTION === "1";
 const emitXAiPromptCompleteThenHang = process.env.T3_ACP_EMIT_XAI_PROMPT_COMPLETE_THEN_HANG === "1";
@@ -713,6 +714,72 @@ const program = Effect.gen(function* () {
         });
 
         return { stopReason: cancelled ? "cancelled" : "end_turn" };
+      }
+
+      if (emitThoughtsAndDiff) {
+        const toolCallId = "diff-tool-call-1";
+
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "agent_thought_chunk",
+            content: { type: "text", text: "Considering the change. " },
+          },
+        });
+
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "agent_thought_chunk",
+            content: { type: "text", text: "Editing the file now." },
+          },
+        });
+
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "tool_call",
+            toolCallId,
+            title: "Edit greeting.txt",
+            kind: "edit",
+            status: "pending",
+            content: [
+              {
+                type: "diff",
+                path: "greeting.txt",
+                oldText: "hello\n",
+                newText: "hello world\n",
+              },
+            ],
+          },
+        });
+
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId,
+            status: "completed",
+            content: [
+              {
+                type: "diff",
+                path: "greeting.txt",
+                oldText: "hello\n",
+                newText: "hello world\nbye\n",
+              },
+            ],
+          },
+        });
+
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: "done editing" },
+          },
+        });
+
+        return { stopReason: "end_turn" };
       }
 
       if (emitGenericToolPlaceholders) {

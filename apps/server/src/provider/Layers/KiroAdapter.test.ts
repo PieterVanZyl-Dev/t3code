@@ -167,6 +167,15 @@ it.layer(kiroAdapterTestLayer)("KiroAdapterLive", (it) => {
         "turn.completed",
       ] as const);
 
+      // A turn that streams no agent thoughts and no diffs emits no proposed or
+      // diff events (mirrors Codex, which only finalizes proposed content when a
+      // plan item completed).
+      assert.notIncludeMembers(types, [
+        "turn.proposed.delta",
+        "turn.proposed.completed",
+        "turn.diff.updated",
+      ] as const);
+
       const delta = runtimeEvents.find((e) => e.type === "content.delta");
       assert.isDefined(delta);
       if (delta?.type === "content.delta") {
@@ -239,6 +248,88 @@ it.layer(kiroAdapterTestLayer)("KiroAdapterLive", (it) => {
       if (resolved?.type === "request.resolved") {
         assert.equal(resolved.payload.decision, "accept");
       }
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("streams agent thoughts as proposed content and tool diffs as turn diffs", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("kiro-thoughts-and-diff");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockKiroWrapper({ T3_ACP_EMIT_THOUGHTS_AND_DIFF: "1" }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+
+      const runtimeEvents: ProviderRuntimeEvent[] = [];
+      const turnCompleted = yield* Deferred.make<void>();
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => {
+          runtimeEvents.push(event);
+        }).pipe(
+          Effect.andThen(
+            event.type === "turn.completed"
+              ? Deferred.succeed(turnCompleted, undefined)
+              : Effect.void,
+          ),
+        ),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("kiro"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: ProviderInstanceId.make("kiro"), model: "grok-build" },
+      });
+
+      yield* adapter.sendTurn({ threadId, input: "edit the file", attachments: [] });
+      yield* Deferred.await(turnCompleted);
+      yield* Fiber.interrupt(runtimeEventsFiber);
+
+      const types = runtimeEvents.map((e) => e.type);
+      assert.includeMembers(types, [
+        "turn.proposed.delta",
+        "turn.proposed.completed",
+        "turn.diff.updated",
+        "turn.completed",
+      ] as const);
+
+      // Each streamed thought chunk becomes a proposed delta.
+      const proposedDeltas = runtimeEvents.filter((e) => e.type === "turn.proposed.delta");
+      assert.deepStrictEqual(
+        proposedDeltas.map((e) => (e.type === "turn.proposed.delta" ? e.payload.delta : "")),
+        ["Considering the change. ", "Editing the file now."],
+      );
+
+      // The accumulated thought is finalized once as a proposed summary.
+      const proposedCompleted = runtimeEvents.filter((e) => e.type === "turn.proposed.completed");
+      assert.lengthOf(proposedCompleted, 1);
+      const completedProposal = proposedCompleted[0];
+      if (completedProposal?.type === "turn.proposed.completed") {
+        assert.equal(
+          completedProposal.payload.planMarkdown,
+          "Considering the change. Editing the file now.",
+        );
+      }
+
+      // The proposed summary is finalized before the turn settles.
+      const proposedCompletedIndex = types.indexOf("turn.proposed.completed");
+      const turnCompletedIndex = types.indexOf("turn.completed");
+      assert.isBelow(proposedCompletedIndex, turnCompletedIndex);
+
+      // Both the tool_call and tool_call_update diff payloads surface.
+      const diffs = runtimeEvents.filter((e) => e.type === "turn.diff.updated");
+      assert.lengthOf(diffs, 2);
+      const firstDiff = diffs[0];
+      if (firstDiff?.type === "turn.diff.updated") {
+        assert.include(firstDiff.payload.unifiedDiff, "diff --git a/greeting.txt b/greeting.txt");
+        assert.include(firstDiff.payload.unifiedDiff, "+hello world");
+      }
+
+      // Diff events are additive: the tool-call lifecycle still emits its item
+      // event alongside the diff.
+      assert.include(types, "item.completed");
 
       yield* adapter.stopSession(threadId);
     }),
