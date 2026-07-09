@@ -68,7 +68,13 @@ export interface AcpSessionRuntimeOptions {
     readonly name: string;
     readonly version: string;
   };
-  readonly authMethodId: string;
+  /**
+   * Authentication method advertised by the agent. When omitted, the ACP
+   * `authenticate` request is skipped entirely — used by agents that
+   * authenticate out-of-band (e.g. Kiro via AWS IAM Identity Center) and
+   * advertise no auth methods.
+   */
+  readonly authMethodId?: string | undefined;
   readonly mcpServers?: ReadonlyArray<EffectAcpSchema.McpServer>;
   readonly requestLogger?: (event: AcpSessionRequestLogEvent) => Effect.Effect<void, never>;
   readonly protocolLogging?: {
@@ -541,15 +547,19 @@ export const make = (
         acp.agent.initialize(initializePayload),
       );
 
-      const authenticatePayload = {
-        methodId: options.authMethodId,
-      } satisfies EffectAcpSchema.AuthenticateRequest;
+      // Agents that authenticate out-of-band advertise no auth methods; skip
+      // the ACP `authenticate` request entirely when no method id is provided.
+      if (options.authMethodId !== undefined) {
+        const authenticatePayload = {
+          methodId: options.authMethodId,
+        } satisfies EffectAcpSchema.AuthenticateRequest;
 
-      yield* runLoggedRequest(
-        "authenticate",
-        authenticatePayload,
-        acp.agent.authenticate(authenticatePayload),
-      );
+        yield* runLoggedRequest(
+          "authenticate",
+          authenticatePayload,
+          acp.agent.authenticate(authenticatePayload),
+        );
+      }
 
       let sessionId: string;
       let sessionSetupResult:
