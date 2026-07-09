@@ -1,0 +1,674 @@
+import * as path from "node:path";
+import * as os from "node:os";
+import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import { Effect } from "effect";
+import { describe, expect, it } from "vitest";
+import type * as EffectAcpSchema from "effect-acp/schema";
+import type { KiroSettings, ServerProviderModel } from "@t3tools/contracts";
+
+import {
+  buildKiroProviderSnapshot,
+  buildKiroCapabilitiesFromConfigOptions,
+  buildKiroDiscoveredModelsFromConfigOptions,
+  discoverKiroModelCapabilitiesViaAcp,
+  discoverKiroModelsViaAcp,
+  getKiroFallbackModels,
+  getKiroParameterizedModelPickerUnsupportedMessage,
+  parseKiroAboutOutput,
+  parseKiroCliConfigChannel,
+  parseKiroVersionDate,
+  resolveKiroAcpBaseModelId,
+  resolveKiroAcpConfigUpdates,
+} from "./KiroProvider.ts";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const mockAgentPath = path.join(__dirname, "../../../scripts/acp-mock-agent.ts");
+
+async function makeMockAgentWrapper(extraEnv?: Record<string, string>) {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "kiro-provider-mock-"));
+  const wrapperPath = path.join(dir, "fake-agent.sh");
+  const envExports = Object.entries(extraEnv ?? {})
+    .map(([key, value]) => `export ${key}=${JSON.stringify(value)}`)
+    .join("\n");
+  const script = `#!/bin/sh
+${envExports}
+exec ${JSON.stringify("bun")} ${JSON.stringify(mockAgentPath)} "$@"
+`;
+  await writeFile(wrapperPath, script, "utf8");
+  await chmod(wrapperPath, 0o755);
+  return wrapperPath;
+}
+
+async function waitForFileContent(filePath: string, attempts = 40): Promise<string> {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const content = await readFile(filePath, "utf8");
+      if (content.trim().length > 0) {
+        return content;
+      }
+    } catch {}
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`Timed out waiting for file content at ${filePath}`);
+}
+
+const parameterizedGpt54ConfigOptions = [
+  {
+    type: "select",
+    currentValue: "gpt-5.4-medium-fast",
+    options: [{ name: "GPT-5.4", value: "gpt-5.4-medium-fast" }],
+    category: "model",
+    id: "model",
+    name: "Model",
+  },
+  {
+    type: "select",
+    currentValue: "medium",
+    options: [
+      { name: "None", value: "none" },
+      { name: "Low", value: "low" },
+      { name: "Medium", value: "medium" },
+      { name: "High", value: "high" },
+      { name: "Extra High", value: "extra-high" },
+    ],
+    category: "thought_level",
+    id: "reasoning",
+    name: "Reasoning",
+  },
+  {
+    type: "select",
+    currentValue: "272k",
+    options: [
+      { name: "272K", value: "272k" },
+      { name: "1M", value: "1m" },
+    ],
+    category: "model_config",
+    id: "context",
+    name: "Context",
+  },
+  {
+    type: "select",
+    currentValue: "false",
+    options: [
+      { name: "Off", value: "false" },
+      { name: "Fast", value: "true" },
+    ],
+    category: "model_config",
+    id: "fast",
+    name: "Fast",
+  },
+] satisfies ReadonlyArray<EffectAcpSchema.SessionConfigOption>;
+
+const parameterizedClaudeConfigOptions = [
+  {
+    type: "select",
+    currentValue: "claude-4.6-opus-high-thinking",
+    options: [{ name: "Opus 4.6", value: "claude-4.6-opus-high-thinking" }],
+    category: "model",
+    id: "model",
+    name: "Model",
+  },
+  {
+    type: "select",
+    currentValue: "high",
+    options: [
+      { name: "Low", value: "low" },
+      { name: "Medium", value: "medium" },
+      { name: "High", value: "high" },
+    ],
+    category: "thought_level",
+    id: "reasoning",
+    name: "Reasoning",
+  },
+  {
+    type: "boolean",
+    currentValue: true,
+    category: "model_config",
+    id: "thinking",
+    name: "Thinking",
+  },
+] satisfies ReadonlyArray<EffectAcpSchema.SessionConfigOption>;
+
+const parameterizedClaudeModelOptionConfigOptions = [
+  {
+    type: "select",
+    currentValue: "claude-opus-4-6",
+    options: [{ name: "Opus 4.6", value: "claude-opus-4-6" }],
+    category: "model",
+    id: "model",
+    name: "Model",
+  },
+  {
+    type: "select",
+    currentValue: "high",
+    options: [
+      { name: "Low", value: "low" },
+      { name: "Medium", value: "medium" },
+      { name: "High", value: "high" },
+    ],
+    category: "thought_level",
+    id: "reasoning",
+    name: "Reasoning",
+  },
+  {
+    type: "select",
+    currentValue: "max",
+    options: [
+      { name: "Low", value: "low" },
+      { name: "Medium", value: "medium" },
+      { name: "High", value: "high" },
+      { name: "Max", value: "max" },
+    ],
+    category: "model_option",
+    id: "effort",
+    name: "Effort",
+  },
+  {
+    type: "select",
+    currentValue: "true",
+    options: [
+      { name: "Off", value: "false" },
+      { name: "Fast", value: "true" },
+    ],
+    category: "model_config",
+    id: "fast",
+    name: "Fast",
+  },
+  {
+    type: "select",
+    currentValue: "true",
+    options: [
+      { name: "Off", value: "false" },
+      { name: ":icon-brain:", value: "true" },
+    ],
+    category: "model_config",
+    id: "thinking",
+    name: "Thinking",
+  },
+] satisfies ReadonlyArray<EffectAcpSchema.SessionConfigOption>;
+
+const sessionNewKiroConfigOptions = [
+  {
+    type: "select",
+    currentValue: "agent",
+    options: [
+      { name: "Agent", value: "agent", description: "Full agent capabilities with tool access" },
+    ],
+    category: "mode",
+    id: "mode",
+    name: "Mode",
+    description: "Controls how the agent executes tasks",
+  },
+  {
+    type: "select",
+    currentValue: "composer-2",
+    options: [
+      { name: "Auto", value: "default" },
+      { name: "Composer 2", value: "composer-2" },
+      { name: "GPT-5.4", value: "gpt-5.4" },
+      { name: "Sonnet 4.6", value: "claude-sonnet-4-6" },
+      { name: "Opus 4.6", value: "claude-opus-4-6" },
+      { name: "Codex 5.3 Spark", value: "gpt-5.3-codex-spark" },
+    ],
+    category: "model",
+    id: "model",
+    name: "Model",
+    description: "Controls which model is used for responses",
+  },
+  {
+    type: "select",
+    currentValue: "true",
+    options: [
+      { name: "Off", value: "false" },
+      { name: "Fast", value: "true" },
+    ],
+    category: "model_config",
+    id: "fast",
+    name: "Fast",
+    description: "Faster speeds.",
+  },
+] satisfies ReadonlyArray<EffectAcpSchema.SessionConfigOption>;
+
+const baseKiroSettings: KiroSettings = {
+  enabled: true,
+  binaryPath: "agent",
+  apiEndpoint: "",
+  customModels: [],
+};
+
+const emptyCapabilities = {
+  reasoningEffortLevels: [],
+  supportsFastMode: false,
+  supportsThinkingToggle: false,
+  contextWindowOptions: [],
+  promptInjectedEffortLevels: [],
+} as const;
+
+describe("getKiroFallbackModels", () => {
+  it("does not publish any built-in kiro models before ACP discovery", () => {
+    expect(
+      getKiroFallbackModels({
+        customModels: ["custom/kiro-model"],
+      }).map((model) => model.slug),
+    ).toEqual(["custom/kiro-model"]);
+  });
+});
+
+describe("buildKiroProviderSnapshot", () => {
+  it("downgrades ready status to warning when ACP model discovery times out", () => {
+    expect(
+      buildKiroProviderSnapshot({
+        checkedAt: "2026-01-01T00:00:00.000Z",
+        kiroSettings: baseKiroSettings,
+        parsed: {
+          version: "2026.04.09-f2b0fcd",
+          status: "ready",
+          auth: { status: "authenticated", type: "Team", label: "Kiro Team Subscription" },
+        },
+        discoveryWarning: "Kiro ACP model discovery timed out after 15000ms.",
+      }),
+    ).toMatchObject({
+      status: "warning",
+      message: "Kiro ACP model discovery timed out after 15000ms.",
+      models: [],
+    });
+  });
+
+  it("preserves provider error state while appending discovery warnings", () => {
+    expect(
+      buildKiroProviderSnapshot({
+        checkedAt: "2026-01-01T00:00:00.000Z",
+        kiroSettings: {
+          ...baseKiroSettings,
+          customModels: ["claude-sonnet-4-6"],
+        },
+        parsed: {
+          version: "2026.04.09-f2b0fcd",
+          status: "error",
+          auth: { status: "unauthenticated" },
+          message: "Kiro Agent is not authenticated. Run `agent login` and try again.",
+        },
+        discoveryWarning: "Kiro ACP model discovery failed. Check server logs for details.",
+      }),
+    ).toMatchObject({
+      status: "error",
+      message:
+        "Kiro Agent is not authenticated. Run `agent login` and try again. Kiro ACP model discovery failed. Check server logs for details.",
+      models: [
+        {
+          slug: "claude-sonnet-4-6",
+          isCustom: true,
+        },
+      ],
+    });
+  });
+});
+
+describe("buildKiroCapabilitiesFromConfigOptions", () => {
+  it("derives model capabilities from parameterized Kiro ACP config options", () => {
+    expect(buildKiroCapabilitiesFromConfigOptions(parameterizedGpt54ConfigOptions)).toEqual({
+      reasoningEffortLevels: [
+        { value: "low", label: "Low" },
+        { value: "medium", label: "Medium", isDefault: true },
+        { value: "high", label: "High" },
+        { value: "xhigh", label: "Extra High" },
+      ],
+      supportsFastMode: true,
+      supportsThinkingToggle: false,
+      contextWindowOptions: [
+        { value: "272k", label: "272K", isDefault: true },
+        { value: "1m", label: "1M" },
+      ],
+      promptInjectedEffortLevels: [],
+    });
+  });
+
+  it("detects boolean thinking toggles from model_config options", () => {
+    expect(buildKiroCapabilitiesFromConfigOptions(parameterizedClaudeConfigOptions)).toEqual({
+      reasoningEffortLevels: [
+        { value: "low", label: "Low" },
+        { value: "medium", label: "Medium" },
+        { value: "high", label: "High", isDefault: true },
+      ],
+      supportsFastMode: false,
+      supportsThinkingToggle: true,
+      contextWindowOptions: [],
+      promptInjectedEffortLevels: [],
+    });
+  });
+
+  it("prefers the newer model_option effort control over legacy thought_level", () => {
+    expect(
+      buildKiroCapabilitiesFromConfigOptions(parameterizedClaudeModelOptionConfigOptions),
+    ).toEqual({
+      reasoningEffortLevels: [
+        { value: "low", label: "Low" },
+        { value: "medium", label: "Medium" },
+        { value: "high", label: "High" },
+        { value: "max", label: "Max", isDefault: true },
+      ],
+      supportsFastMode: true,
+      supportsThinkingToggle: true,
+      contextWindowOptions: [],
+      promptInjectedEffortLevels: [],
+    });
+  });
+});
+
+describe("buildKiroDiscoveredModelsFromConfigOptions", () => {
+  it("publishes ACP model choices immediately from session/new config options", () => {
+    expect(buildKiroDiscoveredModelsFromConfigOptions(sessionNewKiroConfigOptions)).toEqual([
+      {
+        slug: "default",
+        name: "Auto",
+        isCustom: false,
+        capabilities: {
+          reasoningEffortLevels: [],
+          supportsFastMode: false,
+          supportsThinkingToggle: false,
+          contextWindowOptions: [],
+          promptInjectedEffortLevels: [],
+        },
+      },
+      {
+        slug: "composer-2",
+        name: "Composer 2",
+        isCustom: false,
+        capabilities: {
+          reasoningEffortLevels: [],
+          supportsFastMode: true,
+          supportsThinkingToggle: false,
+          contextWindowOptions: [],
+          promptInjectedEffortLevels: [],
+        },
+      },
+      {
+        slug: "gpt-5.4",
+        name: "GPT-5.4",
+        isCustom: false,
+        capabilities: {
+          reasoningEffortLevels: [],
+          supportsFastMode: false,
+          supportsThinkingToggle: false,
+          contextWindowOptions: [],
+          promptInjectedEffortLevels: [],
+        },
+      },
+      {
+        slug: "claude-sonnet-4-6",
+        name: "Sonnet 4.6",
+        isCustom: false,
+        capabilities: {
+          reasoningEffortLevels: [],
+          supportsFastMode: false,
+          supportsThinkingToggle: false,
+          contextWindowOptions: [],
+          promptInjectedEffortLevels: [],
+        },
+      },
+      {
+        slug: "claude-opus-4-6",
+        name: "Opus 4.6",
+        isCustom: false,
+        capabilities: {
+          reasoningEffortLevels: [],
+          supportsFastMode: false,
+          supportsThinkingToggle: false,
+          contextWindowOptions: [],
+          promptInjectedEffortLevels: [],
+        },
+      },
+      {
+        slug: "gpt-5.3-codex-spark",
+        name: "Codex 5.3 Spark",
+        isCustom: false,
+        capabilities: {
+          reasoningEffortLevels: [],
+          supportsFastMode: false,
+          supportsThinkingToggle: false,
+          contextWindowOptions: [],
+          promptInjectedEffortLevels: [],
+        },
+      },
+    ]);
+  });
+});
+
+describe("discoverKiroModelsViaAcp", () => {
+  it("keeps the ACP probe runtime alive long enough to discover models", async () => {
+    const wrapperPath = await makeMockAgentWrapper();
+
+    const models = await Effect.runPromise(
+      discoverKiroModelsViaAcp({
+        enabled: true,
+        binaryPath: wrapperPath,
+        apiEndpoint: "",
+        customModels: [],
+      }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+    );
+
+    expect(models.map((model) => model.slug)).toEqual([
+      "default",
+      "composer-2",
+      "gpt-5.4",
+      "claude-opus-4-6",
+    ]);
+  });
+
+  it("closes the ACP probe runtime after discovery completes", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "kiro-provider-exit-log-"));
+    const exitLogPath = path.join(tempDir, "exit.log");
+    const wrapperPath = await makeMockAgentWrapper({
+      T3_ACP_EXIT_LOG_PATH: exitLogPath,
+    });
+
+    await Effect.runPromise(
+      discoverKiroModelsViaAcp({
+        enabled: true,
+        binaryPath: wrapperPath,
+        apiEndpoint: "",
+        customModels: [],
+      }).pipe(Effect.provide(NodeServices.layer)),
+    );
+
+    const exitLog = await waitForFileContent(exitLogPath);
+    expect(exitLog).toContain("SIGTERM");
+  });
+});
+
+describe("discoverKiroModelCapabilitiesViaAcp", () => {
+  it("closes all ACP probe runtimes after capability enrichment completes", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "kiro-capabilities-exit-log-"));
+    const exitLogPath = path.join(tempDir, "exit.log");
+    const wrapperPath = await makeMockAgentWrapper({
+      T3_ACP_EXIT_LOG_PATH: exitLogPath,
+    });
+    const existingModels: ReadonlyArray<ServerProviderModel> = [
+      { slug: "default", name: "Auto", isCustom: false, capabilities: emptyCapabilities },
+      { slug: "composer-2", name: "Composer 2", isCustom: false, capabilities: emptyCapabilities },
+      { slug: "gpt-5.4", name: "GPT-5.4", isCustom: false, capabilities: emptyCapabilities },
+      {
+        slug: "claude-opus-4-6",
+        name: "Opus 4.6",
+        isCustom: false,
+        capabilities: emptyCapabilities,
+      },
+    ];
+
+    const models = await Effect.runPromise(
+      discoverKiroModelCapabilitiesViaAcp(
+        {
+          enabled: true,
+          binaryPath: wrapperPath,
+          apiEndpoint: "",
+          customModels: [],
+        },
+        existingModels,
+      ).pipe(Effect.provide(NodeServices.layer)),
+    );
+
+    expect(models.map((model) => model.slug)).toEqual([
+      "default",
+      "composer-2",
+      "gpt-5.4",
+      "claude-opus-4-6",
+    ]);
+
+    const exitLog = await waitForFileContent(exitLogPath);
+    expect(exitLog.match(/SIGTERM/g)?.length ?? 0).toBe(4);
+  });
+});
+
+describe("parseKiroAboutOutput", () => {
+  it("treats a successful whoami with Email line as authenticated", () => {
+    expect(
+      parseKiroAboutOutput({
+        code: 0,
+        stdout:
+          "kiro-cli 2.0.1\nLogged in with IAM Identity Center (https://example.awsapps.com/start)\nEmail: user@example.com\n",
+        stderr: "",
+      }),
+    ).toEqual({
+      version: "2.0.1",
+      status: "ready",
+      auth: {
+        status: "authenticated",
+      },
+    });
+  });
+
+  it("treats whoami output containing 'Not logged in' as unauthenticated", () => {
+    expect(
+      parseKiroAboutOutput({
+        code: 1,
+        stdout: "kiro-cli 2.0.1\nNot logged in\n",
+        stderr: "",
+      }),
+    ).toEqual({
+      version: "2.0.1",
+      status: "error",
+      auth: {
+        status: "unauthenticated",
+      },
+      message: "Kiro Agent is not authenticated. Run `kiro-cli login` and try again.",
+    });
+  });
+
+  it("marks auth as unknown when whoami exits non-zero without a clear auth signal", () => {
+    expect(
+      parseKiroAboutOutput({
+        code: 1,
+        stdout: "kiro-cli 2.0.1\n",
+        stderr: "transient network error",
+      }),
+    ).toEqual({
+      version: "2.0.1",
+      status: "warning",
+      auth: {
+        status: "unknown",
+      },
+      message: "Could not verify Kiro Agent authentication status.",
+    });
+  });
+});
+
+describe("Kiro parameterized model picker preview gating", () => {
+  it("parses Kiro CLI version dates from build versions", () => {
+    expect(parseKiroVersionDate("2026.04.08-c4e73a3")).toBe(20260408);
+    expect(parseKiroVersionDate("2026.04.09")).toBe(20260409);
+    expect(parseKiroVersionDate("not-a-version")).toBeUndefined();
+  });
+
+  it("parses the Kiro CLI channel from cli-config.json", () => {
+    expect(parseKiroCliConfigChannel('{ "channel": "lab" }')).toBe("lab");
+    expect(parseKiroCliConfigChannel('{ "channel": "stable" }')).toBe("stable");
+    expect(parseKiroCliConfigChannel('{ "version": 1 }')).toBeUndefined();
+    expect(parseKiroCliConfigChannel("not-json")).toBeUndefined();
+  });
+
+  it("returns no warning when the preview requirements are met", () => {
+    expect(
+      getKiroParameterizedModelPickerUnsupportedMessage({
+        version: "2026.04.08-c4e73a3",
+        channel: "lab",
+      }),
+    ).toBeUndefined();
+  });
+
+  it("explains when the Kiro Agent version is too old", () => {
+    expect(
+      getKiroParameterizedModelPickerUnsupportedMessage({
+        version: "2026.04.07-c4e73a3",
+        channel: "lab",
+      }),
+    ).toContain("too old");
+  });
+
+  it("explains when the Kiro Agent channel is not lab", () => {
+    expect(
+      getKiroParameterizedModelPickerUnsupportedMessage({
+        version: "2026.04.08-c4e73a3",
+        channel: "stable",
+      }),
+    ).toContain("lab channel");
+  });
+});
+
+describe("resolveKiroAcpBaseModelId", () => {
+  it("drops bracket traits without rewriting raw ACP model ids", () => {
+    expect(resolveKiroAcpBaseModelId("gpt-5.4[reasoning=medium,context=272k]")).toBe("gpt-5.4");
+    expect(resolveKiroAcpBaseModelId("gpt-5.4-medium-fast")).toBe("gpt-5.4-medium-fast");
+    expect(resolveKiroAcpBaseModelId("claude-4.6-opus-high-thinking")).toBe(
+      "claude-4.6-opus-high-thinking",
+    );
+    expect(resolveKiroAcpBaseModelId("composer-2")).toBe("composer-2");
+    expect(resolveKiroAcpBaseModelId("auto")).toBe("auto");
+  });
+});
+
+describe("resolveKiroAcpConfigUpdates", () => {
+  it("maps Kiro model options onto separate ACP config option updates", () => {
+    expect(
+      resolveKiroAcpConfigUpdates(parameterizedGpt54ConfigOptions, {
+        reasoning: "xhigh",
+        fastMode: true,
+        contextWindow: "1m",
+      }),
+    ).toEqual([
+      { configId: "reasoning", value: "extra-high" },
+      { configId: "context", value: "1m" },
+      { configId: "fast", value: "true" },
+    ]);
+  });
+
+  it("maps boolean thinking toggles when the model exposes them separately", () => {
+    expect(
+      resolveKiroAcpConfigUpdates(parameterizedClaudeConfigOptions, {
+        thinking: false,
+      }),
+    ).toEqual([{ configId: "thinking", value: false }]);
+  });
+
+  it("maps explicit fastMode: false so the adapter can clear a prior fast selection", () => {
+    expect(
+      resolveKiroAcpConfigUpdates(parameterizedGpt54ConfigOptions, {
+        fastMode: false,
+      }),
+    ).toEqual([{ configId: "fast", value: "false" }]);
+  });
+
+  it("writes Kiro effort changes through the newer model_option config when available", () => {
+    expect(
+      resolveKiroAcpConfigUpdates(parameterizedClaudeModelOptionConfigOptions, {
+        reasoning: "max",
+        thinking: false,
+      }),
+    ).toEqual([
+      { configId: "effort", value: "max" },
+      { configId: "thinking", value: "false" },
+    ]);
+  });
+});

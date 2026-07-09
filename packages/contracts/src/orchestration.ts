@@ -3,6 +3,7 @@ import {
   ClaudeModelOptions,
   CodexModelOptions,
   CursorModelOptions,
+  KiroModelOptions,
   OpenCodeModelOptions,
 } from "./model.ts";
 import { RepositoryIdentity } from "./environment.ts";
@@ -30,7 +31,7 @@ export const ORCHESTRATION_WS_METHODS = {
   subscribeThread: "orchestration.subscribeThread",
 } as const;
 
-export const ProviderKind = Schema.Literals(["codex", "claudeAgent", "cursor", "opencode"]);
+export const ProviderKind = Schema.Literals(["codex", "claudeAgent", "cursor", "opencode", "kiro"]);
 export type ProviderKind = typeof ProviderKind.Type;
 export const ProviderApprovalPolicy = Schema.Literals([
   "untrusted",
@@ -75,11 +76,19 @@ export const OpenCodeModelSelection = Schema.Struct({
 });
 export type OpenCodeModelSelection = typeof OpenCodeModelSelection.Type;
 
+export const KiroModelSelection = Schema.Struct({
+  provider: Schema.Literal("kiro"),
+  model: TrimmedNonEmptyString,
+  options: Schema.optionalKey(KiroModelOptions),
+});
+export type KiroModelSelection = typeof KiroModelSelection.Type;
+
 export const ModelSelection = Schema.Union([
   CodexModelSelection,
   ClaudeModelSelection,
   CursorModelSelection,
   OpenCodeModelSelection,
+  KiroModelSelection,
 ]);
 export type ModelSelection = typeof ModelSelection.Type;
 

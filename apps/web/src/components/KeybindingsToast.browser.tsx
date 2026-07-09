@@ -107,6 +107,7 @@ function createBaseServerConfig(): ServerConfig {
           serverPassword: "",
           customModels: [],
         },
+        kiro: { enabled: true, binaryPath: "", apiEndpoint: "", customModels: [] },
       },
     },
   };

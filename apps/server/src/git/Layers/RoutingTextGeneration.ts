@@ -19,6 +19,7 @@ import {
 import { CodexTextGenerationLive } from "./CodexTextGeneration.ts";
 import { ClaudeTextGenerationLive } from "./ClaudeTextGeneration.ts";
 import { CursorTextGenerationLive } from "./CursorTextGeneration.ts";
+import { KiroTextGenerationLive } from "./KiroTextGeneration.ts";
 import { OpenCodeTextGenerationLive } from "./OpenCodeTextGeneration.ts";
 
 // ---------------------------------------------------------------------------
@@ -37,6 +38,10 @@ class CursorTextGen extends Context.Service<CursorTextGen, TextGenerationShape>(
   "t3/git/Layers/RoutingTextGeneration/CursorTextGen",
 ) {}
 
+class KiroTextGen extends Context.Service<KiroTextGen, TextGenerationShape>()(
+  "t3/git/Layers/RoutingTextGeneration/KiroTextGen",
+) {}
+
 class OpenCodeTextGen extends Context.Service<OpenCodeTextGen, TextGenerationShape>()(
   "t3/git/Layers/RoutingTextGeneration/OpenCodeTextGen",
 ) {}
@@ -49,6 +54,7 @@ const makeRoutingTextGeneration = Effect.gen(function* () {
   const codex = yield* CodexTextGen;
   const claude = yield* ClaudeTextGen;
   const cursor = yield* CursorTextGen;
+  const kiro = yield* KiroTextGen;
   const openCode = yield* OpenCodeTextGen;
 
   const route = (provider?: TextGenerationProvider): TextGenerationShape =>
@@ -58,7 +64,9 @@ const makeRoutingTextGeneration = Effect.gen(function* () {
         ? openCode
         : provider === "cursor"
           ? cursor
-          : codex;
+          : provider === "kiro"
+            ? kiro
+            : codex;
 
   return {
     generateCommitMessage: (input) =>
@@ -93,6 +101,14 @@ const InternalCursorLayer = Layer.effect(
   }),
 ).pipe(Layer.provide(CursorTextGenerationLive));
 
+const InternalKiroLayer = Layer.effect(
+  KiroTextGen,
+  Effect.gen(function* () {
+    const svc = yield* TextGeneration;
+    return svc;
+  }),
+).pipe(Layer.provide(KiroTextGenerationLive));
+
 const InternalOpenCodeLayer = Layer.effect(
   OpenCodeTextGen,
   Effect.gen(function* () {
@@ -108,5 +124,6 @@ export const RoutingTextGenerationLive = Layer.effect(
   Layer.provide(InternalCodexLayer),
   Layer.provide(InternalClaudeLayer),
   Layer.provide(InternalCursorLayer),
+  Layer.provide(InternalKiroLayer),
   Layer.provide(InternalOpenCodeLayer),
 );

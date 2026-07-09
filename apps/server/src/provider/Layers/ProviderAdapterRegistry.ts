@@ -18,6 +18,7 @@ import {
 import { ClaudeAdapter } from "../Services/ClaudeAdapter.ts";
 import { CodexAdapter } from "../Services/CodexAdapter.ts";
 import { CursorAdapter } from "../Services/CursorAdapter.ts";
+import { KiroAdapter } from "../Services/KiroAdapter.ts";
 import { OpenCodeAdapter } from "../Services/OpenCodeAdapter.ts";
 
 export interface ProviderAdapterRegistryLiveOptions {
@@ -28,6 +29,7 @@ const makeProviderAdapterRegistry = Effect.fn("makeProviderAdapterRegistry")(fun
   options?: ProviderAdapterRegistryLiveOptions,
 ) {
   const cursorAdapterOption = yield* Effect.serviceOption(CursorAdapter);
+  const kiroAdapterOption = yield* Effect.serviceOption(KiroAdapter);
   const adapters =
     options?.adapters !== undefined
       ? options.adapters
@@ -36,6 +38,7 @@ const makeProviderAdapterRegistry = Effect.fn("makeProviderAdapterRegistry")(fun
           yield* ClaudeAdapter,
           yield* OpenCodeAdapter,
           ...(cursorAdapterOption._tag === "Some" ? [cursorAdapterOption.value] : []),
+          ...(kiroAdapterOption._tag === "Some" ? [kiroAdapterOption.value] : []),
         ];
   const byProvider = new Map(adapters.map((adapter) => [adapter.provider, adapter]));
 
