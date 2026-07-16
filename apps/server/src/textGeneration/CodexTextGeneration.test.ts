@@ -37,6 +37,7 @@ function makeFakeCodexBinary(
     forbidReasoningEffort?: boolean;
     requireArg?: string;
     forbidArg?: string;
+    forbidServiceTier?: boolean;
     stdinMustContain?: string;
     stdinMustNotContain?: string;
   },
@@ -138,6 +139,14 @@ function makeFakeCodexBinary(
               "fi",
             ]
           : []),
+        ...(input.forbidServiceTier
+          ? [
+              'if [ -n "$seen_service_tier" ]; then',
+              '  printf "%s\\n" "service tier config should be omitted: $seen_service_tier" >&2',
+              `  exit 8`,
+              "fi",
+            ]
+          : []),
         ...(input.stdinMustContain !== undefined
           ? [
               // @effect-diagnostics-next-line preferSchemaOverJson:off
@@ -187,6 +196,7 @@ function withFakeCodexEnv<A, E, R>(
     forbidReasoningEffort?: boolean;
     requireArg?: string;
     forbidArg?: string;
+    forbidServiceTier?: boolean;
     stdinMustContain?: string;
     stdinMustNotContain?: string;
     launchArgs?: string;
@@ -234,7 +244,7 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
   );
 
   it.effect(
-    "forwards codex service tier and non-default reasoning effort into codex exec config",
+    "omits codex service tier and reasoning effort config even when model selection specifies them",
     () =>
       withFakeCodexEnv(
         {
@@ -242,8 +252,8 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
             subject: "Add important change",
             body: "",
           }),
-          requireServiceTier: "priority",
-          requireReasoningEffort: "xhigh",
+          forbidServiceTier: true,
+          forbidReasoningEffort: true,
           stdinMustNotContain: "branch must be a short semantic git branch fragment",
         },
         (textGeneration) =>
@@ -305,14 +315,14 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
     ),
   );
 
-  it.effect("defaults git text generation codex effort to low", () =>
+  it.effect("never passes reasoning effort config into codex exec", () =>
     withFakeCodexEnv(
       {
         output: JSON.stringify({
           subject: "Add important change",
           body: "",
         }),
-        requireReasoningEffort: "low",
+        forbidReasoningEffort: true,
       },
       (textGeneration) =>
         textGeneration.generateCommitMessage({

@@ -30,10 +30,7 @@ import {
   sanitizeThreadTitle,
   toJsonSchemaObject,
 } from "./TextGenerationUtils.ts";
-import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
-import { getCodexServiceTierOptionValue } from "../codexModelOptions.ts";
 
-const CODEX_GIT_TEXT_GENERATION_REASONING_EFFORT = "low";
 const CODEX_TIMEOUT_MS = 180_000;
 const encodeJsonString = Schema.encodeEffect(Schema.UnknownFromJsonString);
 /**
@@ -176,10 +173,10 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
 
     const runCodexCommand = Effect.fn("runCodexJson.runCodexCommand")(function* () {
       const launchArgs = resolveCodexLaunchArgs(codexConfig.launchArgs, resolvedEnvironment);
-      const reasoningEffort =
-        getModelSelectionStringOptionValue(modelSelection, "reasoningEffort") ??
-        CODEX_GIT_TEXT_GENERATION_REASONING_EFFORT;
-      const serviceTier = getCodexServiceTierOptionValue(modelSelection);
+      // Intentionally no `-c`/`--config` flags are passed here. Some Codex CLI
+      // builds re-resolve credentials when a config flag is present, which can
+      // fail authentication for reasons unrelated to the config key. These
+      // background tasks therefore use the configured defaults.
       const spawnCommand = yield* resolveSpawnCommand(
         codexConfig.binaryPath || "codex",
         [
@@ -191,9 +188,6 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
           "read-only",
           "--model",
           modelSelection.model,
-          "--config",
-          `model_reasoning_effort="${reasoningEffort}"`,
-          ...(serviceTier ? ["--config", `service_tier="${serviceTier}"`] : []),
           "--output-schema",
           schemaPath,
           "--output-last-message",
