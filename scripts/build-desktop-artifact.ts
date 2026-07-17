@@ -55,6 +55,13 @@ const StageWorkspaceConfig = Schema.Struct({
     cpu: Schema.Array(Schema.String),
     libc: Schema.optional(Schema.Array(Schema.String)),
   }),
+  // Force a flat, real-directory node_modules for the staged production
+  // install. pnpm's default isolated layout keeps much of the closure behind
+  // symlinks in `.pnpm`, which is unsuitable for the closure-promotion step
+  // before electron-builder runs. A hoisted linker materializes the complete
+  // production closure as top-level package directories that can be enumerated
+  // deterministically.
+  nodeLinker: Schema.optional(Schema.String),
   // pnpm 11 only reads these from pnpm-workspace.yaml (not package.json#pnpm).
   // Without allowBuilds the staged `vp install --prod` fails with
   // ERR_PNPM_IGNORED_BUILDS for packages that have lifecycle scripts.
@@ -69,7 +76,7 @@ const RepoRoot = Effect.service(Path.Path).pipe(
 );
 const encodeJsonString = Schema.encodeEffect(Schema.UnknownFromJsonString);
 const decodeWorkspaceConfig = Schema.decodeEffect(fromYaml(WorkspaceConfig));
-const decodeNodePtyManifest = Schema.decodeUnknownEffect(
+const decodePackageVersionManifest = Schema.decodeUnknownEffect(
   Schema.fromJsonString(Schema.Struct({ version: Schema.String })),
 );
 const encodeStageWorkspaceConfig = Schema.encodeEffect(fromYaml(StageWorkspaceConfig));
@@ -985,6 +992,7 @@ export function createStageWorkspaceConfig(input: {
 
   return {
     supportedArchitectures,
+    nodeLinker: "hoisted",
     ...(allowBuilds && Object.keys(allowBuilds).length > 0 ? { allowBuilds } : {}),
     ...(patchedDependencies && Object.keys(patchedDependencies).length > 0
       ? { patchedDependencies }
@@ -1694,7 +1702,7 @@ const stageWslNodePtyPrebuild = Effect.fn("stageWslNodePtyPrebuild")(function* (
 
   const manifestPath = path.join(nodePtyDir, "package.json");
   const pkgRaw = yield* fs.readFileString(manifestPath);
-  const manifest = yield* decodeNodePtyManifest(pkgRaw).pipe(
+  const manifest = yield* decodePackageVersionManifest(pkgRaw).pipe(
     Effect.mapError(
       (cause) =>
         new WslNodePtyManifestReadError({
@@ -1955,6 +1963,10 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     path.join(stageAppDir, "pnpm-workspace.yaml"),
     stageWorkspaceConfigString,
   );
+  // Also pin the hoisted linker via .npmrc. `node-linker` is honored from
+  // .npmrc across pnpm versions regardless of the pnpm-workspace.yaml key
+  // spelling, ensuring the closure-promotion step below sees a flat tree.
+  yield* fs.writeFileString(path.join(stageAppDir, ".npmrc"), "node-linker=hoisted\n");
 
   if (Object.keys(stagePatchedDependencies).length > 0) {
     yield* fs.copy(path.join(repoRoot, "patches"), path.join(stageAppDir, "patches"));
@@ -1980,6 +1992,57 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       prebuildPath: options.wslPrebuild,
     });
   }
+
+  // electron-builder's pnpm dependency collector builds its pack list by
+  // walking `pnpm list --prod --json`. pnpm reports *patched* packages (our
+  // patched `effect`) with an empty dependency list, and the collector
+  // memoizes that truncated node — so effect's transitive deps
+  // (find-my-way-ts, msgpackr, multipasta, fast-check -> pure-rand, ...) are
+  // never collected and get dropped from the packaged app, crashing it at
+  // startup with ERR_MODULE_NOT_FOUND. The staged `vp install --prod` already
+  // materialized the complete, hoisted production closure on disk, so promote
+  // every installed top-level package to a direct dependency. That makes the
+  // collector reach each package straight from the root, independent of any
+  // truncated/memoized subtree, and guarantees the full closure is packed.
+  const stageNodeModulesDir = path.join(stageAppDir, "node_modules");
+  const stageNodeModuleEntries = yield* fs.readDirectory(stageNodeModulesDir);
+  // `electron` (and any other staged devDependency) must stay out of
+  // "dependencies" — electron-builder rejects it there.
+  const stageDevDependencyNames = new Set(Object.keys(stagePackageJson.devDependencies ?? {}));
+  const stageProductionClosure: Record<string, string> = {};
+  for (const entry of stageNodeModuleEntries) {
+    // Skip pnpm bookkeeping (.pnpm, .bin, .modules.yaml, ...).
+    if (entry.startsWith(".")) continue;
+    const packageNames = entry.startsWith("@")
+      ? (yield* fs.readDirectory(path.join(stageNodeModulesDir, entry)))
+          .filter((scopedPackage) => !scopedPackage.startsWith("."))
+          .map((scopedPackage) => `${entry}/${scopedPackage}`)
+      : [entry];
+    for (const packageName of packageNames) {
+      if (stageDevDependencyNames.has(packageName)) continue;
+      // Pin the actual installed version so electron-builder's version checks
+      // (e.g. electron-updater ^4.0.0) pass instead of failing on "*".
+      const version = yield* fs
+        .readFileString(path.join(stageNodeModulesDir, packageName, "package.json"))
+        .pipe(
+          Effect.flatMap(decodePackageVersionManifest),
+          Effect.map((manifest): string | undefined => manifest.version),
+          Effect.orElseSucceed(() => undefined),
+        );
+      if (version) {
+        stageProductionClosure[packageName] = version;
+      }
+    }
+  }
+  const flattenedStagePackageJson: StagePackageJson = {
+    ...stagePackageJson,
+    dependencies: stageProductionClosure,
+  };
+  const flattenedStagePackageJsonString = yield* encodeJsonString(flattenedStagePackageJson);
+  yield* fs.writeFileString(
+    path.join(stageAppDir, "package.json"),
+    `${flattenedStagePackageJsonString}\n`,
+  );
 
   // electron-builder treats several set-but-empty variables (e.g. CSC_LINK="")
   // as enabled, so copy the host env and scrub empty values instead of relying
