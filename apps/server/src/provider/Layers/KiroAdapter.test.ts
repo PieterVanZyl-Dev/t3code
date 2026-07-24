@@ -390,8 +390,13 @@ it.layer(kiroAdapterTestLayer)("KiroAdapterLive", (it) => {
     () =>
       Effect.gen(function* () {
         const threadId = ThreadId.make("kiro-prompt-failure-ready");
+        const failureDetail =
+          "The selected model is not available. Choose another model and try again.";
         const wrapperPath = yield* Effect.promise(() =>
-          makeMockKiroWrapper({ T3_ACP_FAIL_PROMPT: "1" }),
+          makeMockKiroWrapper({
+            T3_ACP_FAIL_PROMPT: "1",
+            T3_ACP_PROMPT_FAILURE_DATA: failureDetail,
+          }),
         );
         const adapter = yield* makeTestAdapter(wrapperPath);
         const runtimeEvents: ProviderRuntimeEvent[] = [];
@@ -419,11 +424,13 @@ it.layer(kiroAdapterTestLayer)("KiroAdapterLive", (it) => {
         );
 
         assert.equal(error._tag, "ProviderAdapterRequestError");
+        assert.include(error.message, failureDetail);
+        assert.notInclude(error.message, "Internal error");
         assert.equal(readySession?.status, "ready");
         assert.isUndefined(readySession?.activeTurnId);
         if (failedTurnCompleted?.type === "turn.completed") {
           assert.equal(failedTurnCompleted.payload.state, "failed");
-          assert.isString(failedTurnCompleted.payload.errorMessage);
+          assert.include(failedTurnCompleted.payload.errorMessage ?? "", failureDetail);
         }
 
         yield* Fiber.interrupt(runtimeEventsFiber);

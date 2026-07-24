@@ -84,6 +84,7 @@ export const KiroDriver: ProviderDriver<KiroSettings, KiroDriverEnv> = {
   defaultConfig: (): KiroSettings => decodeKiroSettings({}),
   create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
     Effect.gen(function* () {
+      const crypto = yield* Crypto.Crypto;
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const httpClient = yield* HttpClient.HttpClient;
       const serverSettings = yield* ServerSettingsService;
@@ -115,6 +116,7 @@ export const KiroDriver: ProviderDriver<KiroSettings, KiroDriverEnv> = {
       const checkProvider = checkKiroProviderStatus(effectiveConfig, processEnv).pipe(
         Effect.map(stampIdentity),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Effect.provideService(Crypto.Crypto, crypto),
       );
 
       const snapshotSettings = makeProviderSnapshotSettingsSource(effectiveConfig, serverSettings);

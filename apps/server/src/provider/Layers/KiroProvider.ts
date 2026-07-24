@@ -33,6 +33,7 @@ import {
   type ProviderMaintenanceCapabilities,
 } from "../providerMaintenance.ts";
 import { makeKiroAcpRuntime, resolveKiroAcpBaseModelId } from "../acp/KiroAcpSupport.ts";
+import type * as Crypto from "effect/Crypto";
 
 const KIRO_PRESENTATION = {
   displayName: "Kiro",
@@ -172,12 +173,7 @@ function kiroModelsFromSettings(
   customModels: ReadonlyArray<string> | undefined,
   builtInModels: ReadonlyArray<ServerProviderModel> = KIRO_BUILT_IN_MODELS,
 ): ReadonlyArray<ServerProviderModel> {
-  return providerModelsFromSettings(
-    builtInModels,
-    PROVIDER,
-    customModels ?? [],
-    EMPTY_CAPABILITIES,
-  );
+  return providerModelsFromSettings(builtInModels, customModels ?? [], EMPTY_CAPABILITIES);
 }
 
 function buildKiroDiscoveredModelsFromSessionModelState(
@@ -303,7 +299,11 @@ const runKiroCommand = (
 export const checkKiroProviderStatus = Effect.fn("checkKiroProviderStatus")(function* (
   kiroSettings: KiroSettings,
   environment: NodeJS.ProcessEnv = process.env,
-): Effect.fn.Return<ServerProviderDraft, never, ChildProcessSpawner.ChildProcessSpawner> {
+): Effect.fn.Return<
+  ServerProviderDraft,
+  never,
+  ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto
+> {
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
   const fallbackModels = kiroModelsFromSettings(kiroSettings.customModels);
 

@@ -74,6 +74,7 @@ import {
   currentKiroModelIdFromSessionSetup,
   makeKiroAcpRuntime,
   resolveKiroAcpBaseModelId,
+  resolveKiroAcpRequestedModelId,
 } from "../acp/KiroAcpSupport.ts";
 import { type KiroAdapterShape } from "../Services/KiroAdapter.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
@@ -120,6 +121,7 @@ interface KiroSessionContext {
    * continues it, and only the last remaining prompt settles the turn. */
   promptsInFlight: number;
   currentModelId: string | undefined;
+  readonly modelState: EffectAcpSchema.SessionModelState | null | undefined;
   stopped: boolean;
 }
 
@@ -626,6 +628,7 @@ export function makeKiroAdapter(kiroSettings: KiroSettings, options?: KiroAdapte
               : {}),
             ...acpNativeLoggers,
           }).pipe(
+            Effect.provideService(Crypto.Crypto, crypto),
             Effect.provideService(Scope.Scope, sessionScope),
             Effect.mapError(
               (cause) =>
@@ -710,9 +713,11 @@ export function makeKiroAdapter(kiroSettings: KiroSettings, options?: KiroAdapte
             ),
           );
 
-          const requestedStartModelId = kiroModelSelection?.model
-            ? resolveKiroAcpBaseModelId(kiroModelSelection.model)
-            : undefined;
+          const modelState = started.sessionSetupResult.models;
+          const requestedStartModelId = resolveKiroAcpRequestedModelId({
+            requestedModelId: kiroModelSelection?.model,
+            modelState,
+          });
           const boundModelId = yield* applyKiroAcpModelSelection({
             runtime: acp,
             currentModelId: currentKiroModelIdFromSessionSetup(started.sessionSetupResult),
@@ -753,6 +758,7 @@ export function makeKiroAdapter(kiroSettings: KiroSettings, options?: KiroAdapte
             interruptedTurnIds: new Set(),
             promptsInFlight: 0,
             currentModelId: boundModelId,
+            modelState,
             stopped: false,
           };
 
@@ -944,9 +950,10 @@ export function makeKiroAdapter(kiroSettings: KiroSettings, options?: KiroAdapte
                 input.modelSelection?.instanceId === boundInstanceId
                   ? input.modelSelection
                   : undefined;
-              const requestedTurnModelId = turnModelSelection?.model
-                ? resolveKiroAcpBaseModelId(turnModelSelection.model)
-                : undefined;
+              const requestedTurnModelId = resolveKiroAcpRequestedModelId({
+                requestedModelId: turnModelSelection?.model,
+                modelState: ctx.modelState,
+              });
               const currentModelId = yield* applyKiroAcpModelSelection({
                 runtime: ctx.acp,
                 currentModelId: ctx.currentModelId,

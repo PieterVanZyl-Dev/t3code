@@ -25,4 +25,20 @@ describe("AcpAdapterSupport", () => {
     expect(error._tag).toBe("ProviderAdapterRequestError");
     expect(error.message).toContain("Invalid params");
   });
+
+  it("uses string error data when the protocol message is generic", () => {
+    const error = mapAcpToAdapterError(
+      ProviderDriverKind.make("kiro"),
+      "thread-1" as never,
+      "session/prompt",
+      EffectAcpErrors.AcpRequestError.internalError(
+        "Internal error",
+        "The selected model is not available. Choose another model and try again.",
+      ),
+    );
+
+    expect(error._tag).toBe("ProviderAdapterRequestError");
+    expect(error.message).toContain("The selected model is not available");
+    expect(error.message).not.toContain("Internal error");
+  });
 });

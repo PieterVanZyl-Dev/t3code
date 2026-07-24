@@ -1,15 +1,13 @@
-import { type KiroSettings, ProviderDriverKind } from "@t3tools/contracts";
+import type { KiroSettings } from "@t3tools/contracts";
+import type * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Scope from "effect/Scope";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 import * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/schema";
-import { normalizeModelSlug } from "@t3tools/shared/model";
 
 import * as AcpSessionRuntime from "./AcpSessionRuntime.ts";
-
-const KIRO_DRIVER_KIND = ProviderDriverKind.make("kiro");
 
 /**
  * Client capability advertised at `initialize` so Kiro streams its
@@ -57,7 +55,7 @@ export const makeKiroAcpRuntime = (
 ): Effect.Effect<
   AcpSessionRuntime.AcpSessionRuntime["Service"],
   EffectAcpErrors.AcpError,
-  Scope.Scope
+  Crypto.Crypto | Scope.Scope
 > =>
   Effect.gen(function* () {
     const acpContext = yield* Layer.build(
@@ -83,9 +81,37 @@ export function resolveKiroAcpBaseModelId(model: string | null | undefined): str
   const trimmed = model?.trim();
   const base = trimmed && trimmed.length > 0 ? trimmed : "auto";
   // Strip the parameterized model picker suffix (e.g. `claude-opus-4.6[...]`)
-  // so the id resolves to a base model slug.
-  const withoutParams = base.includes("[") ? base.slice(0, base.indexOf("[")) : base;
-  return normalizeModelSlug(withoutParams, KIRO_DRIVER_KIND) ?? "auto";
+  // while preserving the exact model id advertised by the ACP agent.
+  return base.includes("[") ? base.slice(0, base.indexOf("[")) : base;
+}
+
+export function resolveKiroAcpRequestedModelId(input: {
+  readonly requestedModelId: string | undefined;
+  readonly modelState: EffectAcpSchema.SessionModelState | null | undefined;
+}): string | undefined {
+  const requestedModelId = input.requestedModelId?.trim();
+  if (!requestedModelId) {
+    return undefined;
+  }
+
+  const requestedBaseModelId = resolveKiroAcpBaseModelId(requestedModelId);
+  const availableModelIds = new Set(
+    input.modelState?.availableModels.map((model) => resolveKiroAcpBaseModelId(model.modelId)) ??
+      [],
+  );
+  if (availableModelIds.size === 0 || availableModelIds.has(requestedBaseModelId)) {
+    return requestedBaseModelId;
+  }
+
+  const currentModelId = input.modelState?.currentModelId?.trim();
+  if (currentModelId) {
+    const currentBaseModelId = resolveKiroAcpBaseModelId(currentModelId);
+    if (availableModelIds.has(currentBaseModelId)) {
+      return currentBaseModelId;
+    }
+  }
+
+  return availableModelIds.has("auto") ? "auto" : undefined;
 }
 
 export function currentKiroModelIdFromSessionSetup(

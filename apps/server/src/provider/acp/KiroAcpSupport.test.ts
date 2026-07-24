@@ -6,6 +6,7 @@ import {
   applyKiroAcpModelSelection,
   buildKiroAcpSpawnInput,
   resolveKiroAcpBaseModelId,
+  resolveKiroAcpRequestedModelId,
 } from "./KiroAcpSupport.ts";
 
 describe("resolveKiroAcpBaseModelId", () => {
@@ -14,6 +15,52 @@ describe("resolveKiroAcpBaseModelId", () => {
     expect(resolveKiroAcpBaseModelId("   ")).toBe("auto");
     expect(resolveKiroAcpBaseModelId("  claude-sonnet-4.6  ")).toBe("claude-sonnet-4.6");
     expect(resolveKiroAcpBaseModelId("claude-opus-4.6[reasoning=high]")).toBe("claude-opus-4.6");
+  });
+
+  describe("resolveKiroAcpRequestedModelId", () => {
+    const modelState = {
+      currentModelId: "gpt-5.6-sol",
+      availableModels: [
+        { modelId: "auto", name: "Auto" },
+        { modelId: "gpt-5.6-sol", name: "GPT 5.6 Sol" },
+        { modelId: "gpt-5.4", name: "GPT 5.4" },
+      ],
+    };
+
+    it("preserves exact model ids advertised by Kiro", () => {
+      expect(resolveKiroAcpBaseModelId("gpt-5.4")).toBe("gpt-5.4");
+      expect(resolveKiroAcpBaseModelId("openai-gpt-5.4")).toBe("openai-gpt-5.4");
+      expect(resolveKiroAcpRequestedModelId({ requestedModelId: "gpt-5.4", modelState })).toBe(
+        "gpt-5.4",
+      );
+    });
+
+    it("falls back to the advertised current model for a stale selection", () => {
+      expect(
+        resolveKiroAcpRequestedModelId({ requestedModelId: "openai-gpt-5.4", modelState }),
+      ).toBe("gpt-5.6-sol");
+    });
+
+    it("keeps the requested model when the agent does not advertise model state", () => {
+      expect(
+        resolveKiroAcpRequestedModelId({
+          requestedModelId: "custom-model",
+          modelState: undefined,
+        }),
+      ).toBe("custom-model");
+    });
+
+    it("falls back to auto when current is not among advertised models", () => {
+      expect(
+        resolveKiroAcpRequestedModelId({
+          requestedModelId: "stale-model",
+          modelState: {
+            currentModelId: "removed-model",
+            availableModels: [{ modelId: "auto", name: "Auto" }],
+          },
+        }),
+      ).toBe("auto");
+    });
   });
 });
 

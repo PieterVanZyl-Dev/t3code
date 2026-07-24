@@ -71,6 +71,64 @@ interface AcpPendingRequest {
   readonly method: string;
 }
 
+function normalizeProtocolErrorResponse(
+  message: RpcMessage.FromClientEncoded | RpcMessage.FromServerEncoded,
+): RpcMessage.FromClientEncoded | RpcMessage.FromServerEncoded {
+  if (message._tag !== "Exit" || message.exit._tag !== "Failure") {
+    return message;
+  }
+
+  let changed = false;
+  const cause = message.exit.cause.map((entry) => {
+    if (entry._tag !== "Die" || !isProtocolError(entry.defect)) {
+      return entry;
+    }
+    changed = true;
+    return {
+      _tag: "Fail" as const,
+      error: AcpSchema.Error.make({
+        code: entry.defect.code,
+        message: entry.defect.message,
+        ...(entry.defect.data !== undefined ? { data: entry.defect.data } : {}),
+      }),
+    };
+  });
+
+  return changed
+    ? {
+        ...message,
+        exit: {
+          _tag: "Failure",
+          cause,
+        },
+      }
+    : message;
+}
+
+function isNumericRequestId(id: string): boolean {
+  // Effect's RpcServer coerces inbound request ids with `BigInt(id)` and the
+  // ndjson-rpc serializer emits outbound ids with `Number(id)`. Only canonical
+  // integers within the safe range survive both coercions as the same JSON
+  // number, so they can flow through untouched. Everything else (e.g. Kiro's
+  // UUID request ids) throws on `BigInt` and serializes to `null` via `Number`,
+  // so it must be remapped onto an internal numeric id.
+  if (!/^-?\d+$/.test(id)) {
+    return false;
+  }
+  const numeric = Number(id);
+  return Number.isSafeInteger(numeric) && String(numeric) === id;
+}
+
+function replaceEncodedResponseId(
+  encoded: string | Uint8Array,
+  requestId: string,
+): string | Uint8Array {
+  const text = typeof encoded === "string" ? encoded : new TextDecoder().decode(encoded);
+  const hasTrailingNewline = text.endsWith("\n");
+  const value = JSON.parse(text) as Record<string, unknown>;
+  const rewritten = `${JSON.stringify({ ...value, id: requestId })}${hasTrailingNewline ? "\n" : ""}`;
+  return typeof encoded === "string" ? rewritten : new TextEncoder().encode(rewritten);
+}
 const decodeSessionUpdate = Schema.decodeUnknownEffect(AcpSchema.SessionNotification);
 const decodeElicitationComplete = Schema.decodeUnknownEffect(
   AcpSchema.ElicitationCompleteNotification,
@@ -89,6 +147,11 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
   const nextRequestId = yield* Ref.make(1);
   const terminationHandled = yield* Ref.make(false);
   const extPending = yield* Ref.make(new Map<string, AcpPendingRequest>());
+  const serverRequestIds = yield* Ref.make({
+    nextId: 1n,
+    externalToInternal: new Map<string, string>(),
+    internalToExternal: new Map<string, string>(),
+  });
 
   const logProtocol = (event: AcpProtocolLogEvent) => {
     if (event.direction === "incoming" && !options.logIncoming) {
@@ -105,6 +168,7 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
 
   const offerOutgoing = Effect.fn("offerOutgoing")(function* (
     message: RpcMessage.FromClientEncoded | RpcMessage.FromServerEncoded,
+    wireRequestId?: string,
   ) {
     yield* logProtocol({
       direction: "outgoing",
@@ -114,14 +178,20 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
 
     const method = message._tag === "Request" ? message.tag : undefined;
     const encodedRequestId =
-      message._tag === "Request"
+      wireRequestId ??
+      (message._tag === "Request"
         ? message.id
         : "requestId" in message
           ? message.requestId
-          : undefined;
+          : undefined);
     const requestId = encodedRequestId === "" ? undefined : encodedRequestId;
     const encoded = yield* Effect.try({
-      try: () => parser.encode(message),
+      try: () => {
+        const value = parser.encode(message);
+        return value && wireRequestId !== undefined
+          ? replaceEncodedResponseId(value, wireRequestId)
+          : value;
+      },
       catch: (cause) => AcpError.AcpProtocolParseError.fromEncodingError(method, requestId, cause),
     });
 
@@ -167,6 +237,65 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
 
   const completeExtPendingSuccess = (requestId: AcpError.AcpRequestId, value: unknown) =>
     resolveExtPending(requestId, ({ deferred }) => Deferred.succeed(deferred, value));
+
+  const resolveServerRequestId = (externalId: string) =>
+    isNumericRequestId(externalId)
+      ? Effect.succeed(externalId)
+      : Ref.modify(serverRequestIds, (state) => {
+          const existing = state.externalToInternal.get(externalId);
+          if (existing !== undefined) {
+            return [existing, state] as const;
+          }
+
+          const internalId = String(state.nextId);
+          return [
+            internalId,
+            {
+              nextId: state.nextId + 1n,
+              externalToInternal: new Map(state.externalToInternal).set(externalId, internalId),
+              internalToExternal: new Map(state.internalToExternal).set(internalId, externalId),
+            },
+          ] as const;
+        });
+
+  const offerServerControl = (message: RpcMessage.AckEncoded | RpcMessage.InterruptEncoded) =>
+    Ref.get(serverRequestIds).pipe(
+      Effect.flatMap((state) => {
+        const internalId = state.externalToInternal.get(message.requestId);
+        if (internalId !== undefined) {
+          return Queue.offer(serverQueue, { ...message, requestId: internalId }).pipe(
+            Effect.asVoid,
+          );
+        }
+        // A control frame for an id we never remapped must still be numeric,
+        // otherwise the server's `BigInt(id)` coercion would crash the fiber.
+        return isNumericRequestId(message.requestId)
+          ? Queue.offer(serverQueue, message).pipe(Effect.asVoid)
+          : Effect.void;
+      }),
+    );
+
+  const offerServerResponse = (message: RpcMessage.FromServerEncoded) => {
+    if (message._tag !== "Chunk" && message._tag !== "Exit") {
+      return offerOutgoing(message);
+    }
+
+    return Ref.modify(serverRequestIds, (state) => {
+      const externalId = state.internalToExternal.get(message.requestId);
+      if (externalId === undefined || message._tag === "Chunk") {
+        return [[message, externalId] as const, state] as const;
+      }
+
+      const externalToInternal = new Map(state.externalToInternal);
+      const internalToExternal = new Map(state.internalToExternal);
+      externalToInternal.delete(externalId);
+      internalToExternal.delete(message.requestId);
+      return [
+        [message, externalId] as const,
+        { ...state, externalToInternal, internalToExternal },
+      ] as const;
+    }).pipe(Effect.flatMap(([response, externalId]) => offerOutgoing(response, externalId)));
+  };
 
   const failAllExtPending = (error: AcpError.AcpError) =>
     Ref.getAndSet(extPending, new Map()).pipe(
@@ -336,7 +465,11 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
       );
     }
 
-    return Queue.offer(serverQueue, message).pipe(Effect.asVoid);
+    return resolveServerRequestId(message.id).pipe(
+      Effect.flatMap((internalId) =>
+        Queue.offer(serverQueue, { ...message, id: internalId }).pipe(Effect.asVoid),
+      ),
+    );
   };
 
   const handleExitEncoded = (message: RpcMessage.ResponseExitEncoded) =>
@@ -400,6 +533,7 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
         return Queue.offer(clientQueue, message).pipe(Effect.asVoid);
       case "Ack":
       case "Interrupt":
+        return offerServerControl(message);
       case "Ping":
       case "Eof":
         return Queue.offer(serverQueue, message).pipe(Effect.asVoid);
@@ -416,9 +550,11 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
         Effect.flatMap(() =>
           Effect.try({
             try: () =>
-              parser.decode(data) as ReadonlyArray<
-                RpcMessage.FromClientEncoded | RpcMessage.FromServerEncoded
-              >,
+              (
+                parser.decode(data) as ReadonlyArray<
+                  RpcMessage.FromClientEncoded | RpcMessage.FromServerEncoded
+                >
+              ).map(normalizeProtocolErrorResponse),
             catch: (cause) =>
               new AcpError.AcpProtocolParseError({
                 operation: "decode-wire-message",
@@ -506,7 +642,7 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
         Effect.forever,
       ),
     disconnects,
-    send: (_clientId, response) => offerOutgoing(response).pipe(Effect.orDie),
+    send: (_clientId, response) => offerServerResponse(response).pipe(Effect.orDie),
     end: (_clientId) => Queue.end(outgoing),
     clientIds: Effect.succeed(new Set([0])),
     initialMessage: Effect.succeedNone,

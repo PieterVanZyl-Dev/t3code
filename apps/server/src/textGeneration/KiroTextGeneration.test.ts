@@ -144,6 +144,7 @@ it.layer(KiroTextGenerationTestLayer)("KiroTextGeneration", (it) => {
   it.effect("surfaces model-switch failures as text generation errors", () =>
     withFakeAcpKiro(
       {
+        T3_ACP_FAIL_SET_MODEL: "1",
         T3_ACP_PROMPT_RESPONSE_TEXT: JSON.stringify({ branch: "unreachable" }),
       },
       (textGeneration) =>
@@ -154,7 +155,7 @@ it.layer(KiroTextGenerationTestLayer)("KiroTextGeneration", (it) => {
               message: "wire up kiro",
               modelSelection: createModelSelection(
                 ProviderInstanceId.make("kiro"),
-                "missing-kiro-model",
+                "grok-mock-alt",
               ),
             }),
           );

@@ -329,6 +329,54 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
     }),
   );
 
+  it.effect("normalizes standard JSON-RPC errors into typed failure entries", () =>
+    Effect.gen(function* () {
+      const { stdio, input } = yield* makeInMemoryStdio();
+      const transport = yield* AcpProtocol.makeAcpPatchedProtocol({
+        stdio,
+        serverRequestMethods: new Set(),
+      });
+      const received = yield* Deferred.make<unknown>();
+
+      yield* transport.clientProtocol
+        .run(0, (message) => Deferred.succeed(received, message).pipe(Effect.asVoid))
+        .pipe(Effect.forkScoped);
+
+      yield* Queue.offer(
+        input,
+        encoder.encode(
+          `${encodeUnknownJsonString({
+            jsonrpc: "2.0",
+            id: 7,
+            error: {
+              code: -32603,
+              message: "Internal error",
+              data: "The selected model is not available.",
+            },
+          })}\n`,
+        ),
+      );
+
+      assert.deepEqual(yield* Deferred.await(received), {
+        _tag: "Exit",
+        requestId: "7",
+        exit: {
+          _tag: "Failure",
+          cause: [
+            {
+              _tag: "Fail",
+              error: {
+                code: -32603,
+                message: "Internal error",
+                data: "The selected model is not available.",
+              },
+            },
+          ],
+        },
+      });
+    }),
+  );
+
   it.effect("correlates extension response errors with the originating request", () =>
     Effect.gen(function* () {
       const { stdio, input, output } = yield* makeInMemoryStdio();

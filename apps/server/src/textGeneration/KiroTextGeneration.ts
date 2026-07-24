@@ -26,7 +26,7 @@ import {
   applyKiroAcpModelSelection,
   currentKiroModelIdFromSessionSetup,
   makeKiroAcpRuntime,
-  resolveKiroAcpBaseModelId,
+  resolveKiroAcpRequestedModelId,
 } from "../provider/acp/KiroAcpSupport.ts";
 
 const KIRO_TIMEOUT_MS = 180_000;
@@ -57,7 +57,6 @@ export const makeKiroTextGeneration = Effect.fn("makeKiroTextGeneration")(functi
     modelSelection: ModelSelection;
   }): Effect.Effect<S["Type"], TextGenerationError, S["DecodingServices"]> =>
     Effect.gen(function* () {
-      const resolvedModel = resolveKiroAcpBaseModelId(modelSelection.model);
       const outputRef = yield* Ref.make("");
       const runtime = yield* makeKiroAcpRuntime({
         kiroSettings,
@@ -84,7 +83,10 @@ export const makeKiroTextGeneration = Effect.fn("makeKiroTextGeneration")(functi
         yield* applyKiroAcpModelSelection({
           runtime,
           currentModelId: currentKiroModelIdFromSessionSetup(started.sessionSetupResult),
-          requestedModelId: resolvedModel,
+          requestedModelId: resolveKiroAcpRequestedModelId({
+            requestedModelId: modelSelection.model,
+            modelState: started.sessionSetupResult.models,
+          }),
           mapError: (cause) =>
             new TextGenerationError({
               operation,
