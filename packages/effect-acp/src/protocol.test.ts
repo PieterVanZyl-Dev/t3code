@@ -359,7 +359,7 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
 
       assert.deepEqual(yield* Deferred.await(received), {
         _tag: "Exit",
-        requestId: "7",
+        requestId: 7,
         exit: {
           _tag: "Failure",
           cause: [

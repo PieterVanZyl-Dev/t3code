@@ -105,13 +105,15 @@ function normalizeProtocolErrorResponse(
     : message;
 }
 
-function isNumericRequestId(id: string): boolean {
-  // Effect's RpcServer coerces inbound request ids with `BigInt(id)` and the
-  // ndjson-rpc serializer emits outbound ids with `Number(id)`. Only canonical
-  // integers within the safe range survive both coercions as the same JSON
-  // number, so they can flow through untouched. Everything else (e.g. Kiro's
-  // UUID request ids) throws on `BigInt` and serializes to `null` via `Number`,
-  // so it must be remapped onto an internal numeric id.
+function isNumericRequestId(id: string | number): boolean {
+  // Effect's RPC layer passes JSON-RPC ids through natively as
+  // `string | number`. Numeric ids and canonical safe-integer strings flow
+  // through unchanged (including zero). Everything else (e.g. Kiro's UUID
+  // request ids) is remapped onto an internal numeric id so the protocol's
+  // bookkeeping and wire rewrite stay uniform across id shapes.
+  if (typeof id === "number") {
+    return Number.isSafeInteger(id);
+  }
   if (!/^-?\d+$/.test(id)) {
     return false;
   }
@@ -238,11 +240,12 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
   const completeExtPendingSuccess = (requestId: AcpError.AcpRequestId, value: unknown) =>
     resolveExtPending(requestId, ({ deferred }) => Deferred.succeed(deferred, value));
 
-  const resolveServerRequestId = (externalId: string) =>
+  const resolveServerRequestId = (externalId: string | number) =>
     isNumericRequestId(externalId)
       ? Effect.succeed(externalId)
       : Ref.modify(serverRequestIds, (state) => {
-          const existing = state.externalToInternal.get(externalId);
+          const externalKey = String(externalId);
+          const existing = state.externalToInternal.get(externalKey);
           if (existing !== undefined) {
             return [existing, state] as const;
           }
@@ -252,8 +255,8 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
             internalId,
             {
               nextId: state.nextId + 1n,
-              externalToInternal: new Map(state.externalToInternal).set(externalId, internalId),
-              internalToExternal: new Map(state.internalToExternal).set(internalId, externalId),
+              externalToInternal: new Map(state.externalToInternal).set(externalKey, internalId),
+              internalToExternal: new Map(state.internalToExternal).set(internalId, externalKey),
             },
           ] as const;
         });
@@ -261,7 +264,7 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
   const offerServerControl = (message: RpcMessage.AckEncoded | RpcMessage.InterruptEncoded) =>
     Ref.get(serverRequestIds).pipe(
       Effect.flatMap((state) => {
-        const internalId = state.externalToInternal.get(message.requestId);
+        const internalId = state.externalToInternal.get(String(message.requestId));
         if (internalId !== undefined) {
           return Queue.offer(serverQueue, { ...message, requestId: internalId }).pipe(
             Effect.asVoid,
@@ -281,7 +284,7 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
     }
 
     return Ref.modify(serverRequestIds, (state) => {
-      const externalId = state.internalToExternal.get(message.requestId);
+      const externalId = state.internalToExternal.get(String(message.requestId));
       if (externalId === undefined || message._tag === "Chunk") {
         return [[message, externalId] as const, state] as const;
       }
@@ -289,7 +292,7 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
       const externalToInternal = new Map(state.externalToInternal);
       const internalToExternal = new Map(state.internalToExternal);
       externalToInternal.delete(externalId);
-      internalToExternal.delete(message.requestId);
+      internalToExternal.delete(String(message.requestId));
       return [
         [message, externalId] as const,
         { ...state, externalToInternal, internalToExternal },
